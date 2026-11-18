@@ -40,4 +40,16 @@ impl Span {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.end.saturating_sub(self.start) as usize
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.start >= self.end
+    }
+
+    pub fn range(self) -> Range<usize> {
+        self.start as usize..self.end as usize
+    }
+
 }

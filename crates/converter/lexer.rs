@@ -208,7 +208,7 @@ pub fn tag_parts(src: &str, span: Span) -> Option<TagAttrs<'_>> {
 
 pub enum BlockType {
     Blank,
-    Rangegraph,
+    Paragraph,
     Heading { level:u8 },
     Hr,
     Quote { depth: u8 },
@@ -218,7 +218,7 @@ pub enum BlockType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockToken {
-    pub type: BlockType,
+    pub kind: BlockType,
     pub span: Span, // The whole block without surrounding indentation and newline
     pub content: Span, // to feed to lex_inline
 }
@@ -287,7 +287,7 @@ impl<'a> BlockLexer<'a> {
     fn line(&mut self, pos: usize, end: usize) {
         let src = self.src;
 
-        // Inside a multi-line <nowiki>: this line belongs to the rangegraph.
+        // Inside a multi-line <nowiki>: this line belongs to the paragraph.
         if pos < self.raw_until {
             if let Some(p) = self.range.as_mut() {
                 let t = src[pos..end].trim_end_matches(is_hws);
@@ -341,7 +341,7 @@ impl<'a> BlockLexer<'a> {
         if let Some(p) = self.range.take() {
             let span = Span::new(p.start, p.end);
             self.out.push(BlockToken {
-                kind: BlockType::graph,
+                kind: BlockType::Paragraph,
                 span,
                 content: span,
             });
@@ -396,7 +396,7 @@ fn classify(src: &str, pos: usize, end: usize) -> Line {
     let be = bs + body.len();
     let span = Span::new(bs, be);
     let first = body.as_bytes()[0];
-    let block = |kind: BlockKind, cs: usize, ce: usize| {
+    let block = |kind: BlockType, cs: usize, ce: usize| {
         Line::Block(BlockToken {
             kind,
             span,
@@ -406,17 +406,17 @@ fn classify(src: &str, pos: usize, end: usize) -> Line {
 
     if first == b'=' {
         if let Some((level, cs, ce)) = heading(body) {
-            return block(BlockKind::Heading { level }, bs + cs, bs + ce);
+            return block(BlockType::Heading { level }, bs + cs, bs + ce);
         }
     }
 
     if body.len() >= 4 && body.bytes().all(|b| b == b'-') {
-        return block(BlockKind::Hr, be, be);
+        return block(BlockType::Hr, be, be);
     }
 
     if first == b'~' {
         if let Some((cs, ce)) = macro_inner(body) {
-            return block(BlockKind::Macro, bs + cs, bs + ce);
+            return block(BlockType::Macro, bs + cs, bs + ce);
         }
     }
 
@@ -425,7 +425,7 @@ fn classify(src: &str, pos: usize, end: usize) -> Line {
         let after = &body[run..];
         let lead = after.len() - after.trim_start_matches(is_hws).len();
         let depth = run.min(MAX_QUOTE_DEPTH) as u8;
-        return block(BlockKind::Quote { depth }, bs + run + lead, be);
+        return block(BlockType::Quote { depth }, bs + run + lead, be);
     }
 
     if first == b'*' || first == b'-' {
@@ -439,7 +439,7 @@ fn classify(src: &str, pos: usize, end: usize) -> Line {
             let lead = after.len() - after.trim_start_matches(is_hws).len();
             let depth = (cols / 2).min(255) as u8;
             return block(
-                BlockKind::ListItem {
+                BlockType::List {
                     depth,
                     ordered: first == b'-',
                 },

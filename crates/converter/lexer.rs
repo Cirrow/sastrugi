@@ -7,7 +7,7 @@ pub const MAX_RAW_SIZE: usize = u32::MAX as usize;
 
 const MAX_NESTING: usize = 32;      // maximum allowed nesting of syntax. E.g. [[{{**//hello, world!//**}}]] is an example of 4-level nesting.
 const MAX_TAG_LENGTH: usize = 1024; // maximum custom tag length
-const MAX_SRC_LENGTH: usize 1024;   // maximum image/link src length
+const MAX_SRC_LENGTH: usize = 1024;   // maximum image/link src length
 
 const VOID_TAGS: &[&str] = &["br"]; // never closing tags. <br/>
 const URL_SCHEMES: &[&str] = &["http", "https"];
@@ -29,17 +29,17 @@ pub enum LexerError {
     SourceTooLarge { len: usize },
 }
 
-impl fmt::Display for LexError {
+impl fmt::Display for LexerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            LexError::SourceTooLarge { len } => {
+            LexerError::SourceTooLarge { len } => {
                 write!(f, "source is {} bytes; the maximum is {}", len, MAX_RAW_SIZE)
             }
         }
     }
 }
 
-impl std::error::Error for LexError {}
+impl std::error::Error for LexerError {}
 
 // A span is a range of bytes - a locator, a coordinate, if you will.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -80,7 +80,7 @@ fn is_hws(c: char) -> bool {
 }
 
 // case insensitive search. needle must be ascii.
-fn find_ci(hay: &str, needle: &str) -> Option<Usize> {
+fn find_ci(hay: &str, needle: &str) -> Option<usize> {
     let (h, n) = (hay.as_bytes(), needle.as_bytes());
 
     if (n.is_empty() || n.len() > h.len()) {
@@ -90,6 +90,9 @@ fn find_ci(hay: &str, needle: &str) -> Option<Usize> {
     h.windows(n.len()).position(|w| w.eq_ignore_ascii_case(n))
 }
 
+fn to_u32(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
 
 
 // ---------------------------------------------------------------------------
@@ -105,7 +108,7 @@ enum TagType {
 
 #[derive(Debug, Clone, Copy)]
 struct TagInfo {
-    kind: TagType,
+    type: TagType,
     len: usize, // including < and >
     name_start: usize,
     name_end: usize,
@@ -119,42 +122,42 @@ pub struct TagParts<'a> {
 }
 
 fn lex_tag(window: &str) -> Option<TagInfo> {
-    let w = win.as_bytes();
+    let w = window.as_bytes();
     if w.first() != Some(&b'<') {
-        None
+        return None;
     }
 
-    let closing = b.get(1) == Some(&b'/');
+    let closing = w.get(1) == Some(&b'/');
     let name_start = if closing { 2 } else { 1 };
 
     // Only allow alphabetic ascii to be used as tag name start
-    if !b.get(name_start).is_some_and(u8::is_ascii_alphabetic) {
+    if !w.get(name_start).is_some_and(u8::is_ascii_alphabetic) {
         return None;
     }
 
     let mut i = name_start;
-    while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'-') {
+    while i < w.len() && (w[i].is_ascii_alphanumeric() || w[i] == b'-') {
         i += 1;
     }
 
     let name_end = i;
-    if !matches!(b.get(i), Some(b'>' | b'/' | b' ' | b'\t')) {
+    if !matches!(w.get(i), Some(b'>' | b'/' | b' ' | b'\t')) {
         return None;
     }
 
 
-    let cap = b.len().min(MAX_TAG_LENGTH);
-    let limit = b[..cap].iter().position(|&c| c == b'\n').unwrap_or(cap);
+    let cap = w.len().min(MAX_TAG_LENGTH);
+    let limit = w[..cap].iter().position(|&c| c == b'\n').unwrap_or(cap);
     let (mut dq, mut sq) = (false, false); // Check if currently inside a doublequote or singlequote
 
     let mut j = i;
     while j < limit {
-        match b[j] {
+        match w[j] {
             b'"' if !sq => dq = !dq,
             b'\'' if !dq => sq = !sq,
             b'>' if !dq && !sq => {
                 let mut k = j;
-                while k > name_end && matches!(b[k - 1], b' ' | b'\t') {
+                while k > name_end && matches!(w[k - 1], b' ' | b'\t') {
                     k -= 1;
                 }
 
@@ -164,7 +167,7 @@ fn lex_tag(window: &str) -> Option<TagInfo> {
                     }
                     TagType::Close
 
-                } else if k > name_end && b[k - 1] == b'/' {
+                } else if k > name_end && w[k - 1] == b'/' {
                     TagType::SelfClosing
 
                 } else {
@@ -185,11 +188,11 @@ fn lex_tag(window: &str) -> Option<TagInfo> {
     None
 }
 
-pub fn tag_parts(src: &str, span: Span) -> Option<TagAttrs<'_>> {
+pub fn tag_parts(src: &str, span: Span) -> Option<TagParts<'_>> {
     let t = span.body(src);
-    let info = lex_tag(t);
+    let Some(info) = lex_tag(t) else {return None;};
     if info.len != t.len() {
-        None
+        return None;
     }
 
     let name = &t[info.name_start..info.name_end];
@@ -206,6 +209,7 @@ pub fn tag_parts(src: &str, span: Span) -> Option<TagAttrs<'_>> {
 // Block pass
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockType {
     Blank,
     Paragraph,
@@ -218,14 +222,14 @@ pub enum BlockType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockToken {
-    pub kind: BlockType,
+    pub type: BlockType,
     pub span: Span, // The whole block without surrounding indentation and newline
     pub content: Span, // to feed to lex_inline
 }
 
 impl BlockToken {
-    pub fn text<'a>(&self, src:&'a str) -> &'a str {
-        self.content.text(src)
+    pub fn body<'a>(&self, src:&'a str) -> &'a str {
+        self.content.body(src)
     }
 }
 
@@ -248,9 +252,9 @@ struct Range {
     end: usize,
 }
 
-pub fn lex_blocks(src: &str) -> Result<Vec<BlockToken>, LexError> {
+pub fn lex_blocks(src: &str) -> Result<Vec<BlockToken>, LexerError> {
     if src.len() > MAX_RAW_SIZE {
-        return Err(LexError::SourceTooLarge { len: src.len() });
+        return Err(LexerError::SourceTooLarge { len: src.len() });
     }
 
     Ok(BlockLexer {
@@ -287,7 +291,6 @@ impl<'a> BlockLexer<'a> {
     fn line(&mut self, pos: usize, end: usize) {
         let src = self.src;
 
-        // Inside a multi-line <nowiki>: this line belongs to the paragraph.
         if pos < self.raw_until {
             if let Some(p) = self.range.as_mut() {
                 let t = src[pos..end].trim_end_matches(is_hws);
@@ -307,14 +310,14 @@ impl<'a> BlockLexer<'a> {
         match classify(src, pos, end) {
             Line::Blank => {
                 self.flush_range();
-                let extend = matches!(self.out.last(), Some(t) if t.kind == BlockType::Blank);
+                let extend = matches!(self.out.last(), Some(t) if t.type == BlockType::Blank);
                 if extend {
                     if let Some(t) = self.out.last_mut() {
                         t.span = Span::new(t.span.start as usize, end);
                     }
                 } else {
                     self.out.push(BlockToken {
-                        kind: BlockType::Blank,
+                        type: BlockType::Blank,
                         span: Span::new(pos, end),
                         content: Span::new(pos, pos),
                     });
@@ -341,7 +344,7 @@ impl<'a> BlockLexer<'a> {
         if let Some(p) = self.range.take() {
             let span = Span::new(p.start, p.end);
             self.out.push(BlockToken {
-                kind: BlockType::Paragraph,
+                type: BlockType::Paragraph,
                 span,
                 content: span,
             });
@@ -355,13 +358,13 @@ impl<'a> BlockLexer<'a> {
         let bytes = src.as_bytes();
         while from < line_end {
             let lt = from + bytes[from..line_end].iter().position(|&b| b == b'<')?;
-            let Some(tag) = parse_tag(&src[lt..line_end]) else {
+            let Some(tag) = lex_tag(&src[lt..line_end]) else {
                 from = lt + 1;
                 continue;
             };
             from = lt + tag.len;
             let name = &src[lt + tag.name_start..lt + tag.name_end];
-            if tag.kind != TagType::Open || !name.eq_ignore_ascii_case(RAW_TAG) {
+            if tag.type != TagType::Open || !name.eq_ignore_ascii_case(RAW_TAG) {
                 continue;
             }
             if from >= self.raw_missing_from {
@@ -396,9 +399,9 @@ fn classify(src: &str, pos: usize, end: usize) -> Line {
     let be = bs + body.len();
     let span = Span::new(bs, be);
     let first = body.as_bytes()[0];
-    let block = |kind: BlockType, cs: usize, ce: usize| {
+    let block = |type: BlockType, cs: usize, ce: usize| {
         Line::Block(BlockToken {
-            kind,
+            type,
             span,
             content: Span::new(cs, ce),
         })
